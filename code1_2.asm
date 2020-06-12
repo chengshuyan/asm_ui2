@@ -1,0 +1,630 @@
+.586
+DATA SEGMENT USE16
+	EOF=065
+	SHOW DB 0AH,0DH
+     	 DB 17 DUP(' '),'sender',16 DUP(' '),'*',16 DUP(' '),'reciver',0AH,0DH,'$'
+	WIN_LEFT DB 18,3,5,20,35
+	WIN_RIGHT DB 13,3,43,15,73 
+	WIN_LEFT_UP DB 1,3,5,20,35
+	WIN_RIGHT_UP DB 1,3,43,15,73
+	FILE_OUT_UP DB 1,17,43,22,73
+	BUTTON DB 1,22,5,22,10
+	FILE_TEXT DB 1,22,12,22,35
+	FILE_OUT DB 6,17,43,22,73
+	winnum DB 1
+	OLD0B DD ?    ;存储系统0BH中断向量
+	OLD74 DD ?
+	FLAG DB 0      ;标志位
+	CONT DB 0
+	CURSE_LEFT DB 3,5
+	CURSE_RIGHT DB 3,43
+	CURSE_BUTTON DB 22,6
+	CURSE_TEXT DB 22,12
+	CURSE_MOUSE DB 22,12
+	CURSE_FILEOUT DB 17,43
+	lx	db 3    ;win1当前光标位置
+	ly	db 5
+	rx	db 3    ;win2当前光标位置
+	ry	db 43
+	FX DB 17
+	FY DB 43
+	FILE DB 'file$'
+	COLOR DB 0
+	WIN_COLOR DB 3EH
+	FILE_COLOR DB 63H
+	;FILE_NAME DB 20 DUP(?)
+	HANDLE DW ?
+	FNAME  DB '2.txt',0;文件名 
+	ERROR1 DB 'File not found',07H,0,'$' ;提示信息 
+	ERROR2 DB 'Reading error',07H,0,'$' 
+	BUFFER DB ?                  
+	FILE_NAME DB 20
+			  DB ?
+			  DB 20 DUP(?)
+DATA ENDS 
+CODE SEGMENT USE16
+	 ASSUME CS:CODE,DS:DATA
+BEG: 
+	MOV AX,DATA
+	MOV DS,AX
+	CALL UI_DESIGN
+RESTART:
+	CLI			;关中断
+	CALL I8250		;辅串口初始化
+	CALL I8259		;开放8259A辅串口中断
+	CALL RD0B		;保存0BH中断向量
+	CALL WR0B	    ;置换0BH中断向量
+	CALL RD74
+	CALL WR74
+	STI			;开中断
+SCANT:
+	CMP FLAG,-1    
+	JE RETURN
+	MOV DX,2FDH	;查询发送保持寄存器
+	IN AL,DX
+	TEST AL,20H
+	JZ SCANT
+	MOV AH,1	;查询键盘缓冲区
+	INT 16H
+	JZ SCANT
+	MOV AH,0	;读取键盘缓冲区的内容 ASCII->AL
+	INT 16H
+	AND AL,7FH
+	MOV DX,2F8H 
+	OUT DX,AL
+	CMP AL,1BH
+	JNE SCANT
+TWAIT:
+	MOV DX,2FDH
+	IN AL,DX
+	TEST AL,40H   ;测试一帧是否发送完
+	JZ TWAIT
+RETURN:            ;当一帧发送完则执行结束程序
+	CALL RESET    ;恢复系统0BH和74H中断向量
+	MOV AH,4CH
+	INT 21H
+
+;接收中断服务子程序
+RECEIVE PROC
+	PUSH AX
+	PUSH DX
+    PUSH DS
+    MOV AX,DATA
+    MOV DS,AX 
+	MOV DX,2F8H  ;读取接收缓冲区的内容
+    IN  AL,DX
+	AND AL,7FH
+    ;判断是否是'esc'
+	CMP AL,01  
+	JE NEXT
+	;不是则调用display,将键盘输入显示在左右窗口
+	CALL DISPLAY
+	CALL Beep ;接收信息提示音
+	JMP EXIT
+NEXT: MOV FLAG,-1
+EXIT: 
+	MOV AL,20H
+	OUT 20H,AL
+ 	POP DS
+	POP DX
+	POP AX
+	IRET    ;中断返回
+RECEIVE ENDP
+
+DISPLAY PROC
+    CMP AL,0DH
+    JZ NEXT_LINE
+   ;显示在左屏幕
+	MOV AH,2	   ;不是"esc",显示字符在屏幕上
+	MOV DL,AL
+	INT 21H
+	;显示在右屏幕
+	MOV BL,ry
+	MOV CURSE_RIGHT[1],BL
+	MOV BL,rx
+	MOV CURSE_RIGHT[0],BL
+	MOV BX,OFFSET CURSE_RIGHT
+	CALL POS_CURSE
+	MOV AH,2
+	MOV DL,AL
+	INT 21H
+	;更新光标y轴信息+1
+	INC ry
+	;检查是否换行
+    CMP ry,73
+	JLE change_ry
+	;换行
+	MOV ry,43
+	INC rx
+	;检查是否窗口上卷
+	MOV BL,WIN_RIGHT[3]
+	CMP rx,BL
+	JLE change_rx
+	;窗口上卷
+	MOV BX,OFFSET WIN_RIGHT_UP
+	MOV CL,WIN_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	;设rx为最后一行
+	MOV BL,WIN_RIGHT[3]
+	MOV rx,BL
+change_rx:
+    MOV BL,rx
+    MOV CURSE_RIGHT[0],BL
+change_ry:
+	MOV BL,ry
+	MOV CURSE_RIGHT[1],BL
+	MOV BX,OFFSET CURSE_RIGHT
+	CALL POS_CURSE
+	;计算左屏光标位置信息
+    INC ly
+    CMP ly,35
+	JLE change_ly
+	MOV ly,5
+	INC lx
+	MOV BL,WIN_LEFT[3]
+	CMP lx,BL
+	JLE change_lx
+	MOV BX,OFFSET WIN_LEFT_UP
+	MOV CL,WIN_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	MOV BL,WIN_LEFT[3]
+	MOV lx,BL
+change_lx:
+    MOV BL,lx
+    MOV CURSE_LEFT[0],BL
+change_ly:
+	MOV BL,ly
+	MOV CURSE_LEFT[1],BL
+	;在左屏和右屏输出完后，移动光标到左屏
+	MOV BX,OFFSET CURSE_LEFT
+	CALL POS_CURSE
+	JMP THE_END
+NEXT_LINE:
+    MOV ry,43
+	INC rx
+	;检查是否窗口上卷
+	MOV BL,WIN_RIGHT[3]
+	CMP rx,BL
+	JLE change_rx_1
+	;窗口上卷
+	MOV BX,OFFSET WIN_RIGHT_UP
+	MOV CL,WIN_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	;设rx为最后一行
+	MOV BL,WIN_RIGHT[3]
+	MOV rx,BL
+change_rx_1:
+    MOV BL,rx
+    MOV CURSE_RIGHT[0],BL
+	MOV BL,ry
+	MOV CURSE_RIGHT[1],BL
+	MOV BX,OFFSET CURSE_RIGHT
+	CALL POS_CURSE
+	;计算左屏光标位置信息
+	MOV ly,5
+	INC lx
+	MOV BL,WIN_LEFT[3]
+	CMP lx,BL
+	JLE change_lx_1
+	MOV BX,OFFSET WIN_LEFT_UP
+	MOV CL,WIN_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	MOV BL,WIN_LEFT[3]
+	MOV lx,BL
+change_lx_1:
+    MOV BL,lx
+    MOV CURSE_LEFT[0],BL
+	MOV BL,ly
+	MOV CURSE_LEFT[1],BL
+	;在左屏和右屏输出完后，移动光标到左屏
+	MOV BX,OFFSET CURSE_LEFT
+	CALL POS_CURSE
+THE_END:
+	RET
+DISPLAY ENDP
+
+Beep PROC
+	PUSH BX
+	PUSH AX
+	PUSH DX
+	MOV AX,0  ;120000H被除数
+	MOV DX,12H
+	MOV BX,1048  
+	DIV BX       ;计算频率值
+	MOV BX,AX
+	MOV AL,10110110B ;设置定时器工作方式
+    OUT 43H,AL
+  
+    MOV AX,BX            
+    OUT 42H,AL   ;设置计数器低8位
+  
+    MOV AL,AH    ;设置计数器高8位
+    OUT 42H,AL
+  
+    IN AL,61H     ;打开与门
+    OR AL,03H
+    OUT 61H,AL
+    CALL DELAY
+    IN AL,61H     ;关闭与门
+    AND AL,0FCH
+    OUT 61H,AL
+    POP DX
+    POP AX
+    POP BX
+    RET
+Beep ENDP
+
+DELAY  PROC
+  	PUSH CX
+	MOV CX,05H;
+DELAYLOOP1: 
+  	PUSH CX
+  	MOV CX,0FFFFH;
+DELAYLOOP2:
+  	LOOP DELAYLOOP2
+  	POP CX
+  	LOOP DELAYLOOP1
+  	POP CX
+  	RET
+DELAY ENDP
+
+SERVER PROC ;鼠标中断子程序
+	PUSHA
+	PUSH DS
+	MOV AX,DATA
+	MOV DS,AX
+	MOV AX,0  ;初始化鼠标
+    INT 33H
+    MOV AX,1  ;显示鼠标
+    INT 33H
+  	MOV AX,03H  ;功能描述：读取鼠标位置及其按钮状态
+	INT 33H		;入口参数：AX＝03H
+				;出口参数：BX＝按键状态：位0=1——按下左键
+				;位1=1——按下右键
+				;位2=1——按下中键
+				;其它位——保留，内部使用
+				;CX＝水平位置
+				;DX＝垂直位置
+	MOV BL,08H
+	MOV AX,CX
+	DIV BL
+	MOV CL,AL ;计算列信息
+	MOV AX,DX
+	DIV BL
+	MOV CH,AL ;计算行信息
+	MOV BX,OFFSET CURSE_MOUSE ;POS_CURSE到FILE名输入文本行
+	CALL POS_CURSE  
+  	;CMP DX,19   ;检查鼠标是否在（19，12）处点击
+  	;JNZ EXIT
+  	;CMP CX,5
+  	;JC EXIT
+  	;CMP CX,10
+  	;JA EXIT
+  	;MOV BX,OFFSET CURSE_MOUSE
+	;MOV [BX],CH
+	;MOV [BX+1],CL
+  	;CALL POS_CURSE
+  	CALL GET_FILENAME
+  	MOV BX,OFFSET CURSE_FILEOUT
+	CALL POS_CURSE
+  	CALL SHOW_IN_WIN_RIGHT
+  	MOV BX,OFFSET CURSE_LEFT
+	CALL POS_CURSE
+	JMP RESTART
+EXIT:
+	MOV AL,20H  ;给主8259A写结束字
+	OUT 20H,AL
+	POP DS
+	POPA
+	IRET
+SERVER ENDP
+
+GET_FILENAME PROC
+	MOV AX,DATA
+	MOV DS,AX
+	MOV AH,0AH
+	MOV DX,OFFSET FILE_NAME
+	INT 21H
+	MOV BL,FILE_NAME+1
+	MOV BH,0
+	MOV SI,OFFSET FILE_NAME+2
+	MOV BYTE PTR [BX+SI],'$'
+	RET
+GET_FILENAME ENDP
+
+SHOW_IN_WIN_RIGHT PROC
+	MOV AX,DATA
+    MOV DS,AX                                                ;置数据段寄存器 
+    MOV DX,OFFSET FILE_NAME+2
+    MOV AX,3D00H            ;打开指定文件 
+    INT 21H
+    JNC OPEN_OK             ;打开成功，转 
+    MOV SI,OFFSET ERROR1                        ;显示打开不成功提示信息 
+    CALL DMESS 
+    JMP OVER
+OPEN_OK:
+	MOV HANDLE,AX                                        ;保存文件柄
+
+READFILE:  
+    MOV BX,HANDLE
+    CALL READCH                                        ;从文件中读一个字符 
+    JC READERR                                        ;如读出错，则转 
+    CMP AL,EOF                                        ;读到文件结束符吗？ 
+    JZ TYPE_OK                                       ;是，转 
+	MOV AH,09H
+    CALL PUTCH                                        ;显示所读字符 
+    JMP READFILE                                                ;继续 
+READERR:
+	MOV SI,OFFSET ERROR2 
+    CALL DMESS 
+TYPE_OK:
+	MOV AH,3EH 
+	INT 21H 
+OVER:   
+	RET
+SHOW_IN_WIN_RIGHT ENDP
+
+READCH   PROC 
+	MOV CX,1 
+	MOV DX,OFFSET BUFFER                ;置缓冲区地址 
+	MOV AH,3FH                                        ;置功能调用号 
+	INT 21H                                                ;读 
+	JC READCH2                                        ;读出错，转 
+	CMP AX,CX                                        ;判文件是否结束 
+	MOV AL,EOF                                        ;设文件已经结束,置文件结束符     
+	JB READCH1                                        ;文件确已结束，转 
+	MOV AL,BUFFER                                ;文件未结束，取所读字符
+	MOV DX,3F8H;键盘缓冲获得字符存到8259A发送保持寄存器
+	OUT DX,AL 
+READCH1:CLC 
+READCH2:RET 
+READCH ENDP
+
+DMESS PROC 
+DMESS1:
+	MOV DL,[SI] 
+	INC SI 
+	OR DL,DL 
+	JZ DMESS2 
+	MOV AH,2 
+	INT 21H
+	INC FY
+    CMP FY,73
+	JLE change_FY
+	MOV FY,43
+	INC FX
+	MOV BL,FILE_OUT[3]
+	CMP FX,BL
+	JLE change_FX
+	MOV BX,OFFSET FILE_OUT_UP
+	MOV CL,FILE_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	MOV BL,FILE_OUT[3]
+	MOV FX,BL
+change_FX:
+    MOV BL,FX
+    MOV CURSE_FILEOUT[0],BL
+change_FY:
+	MOV BL,FY
+	MOV CURSE_FILEOUT[1],BL
+	MOV BX,OFFSET CURSE_FILEOUT
+	CALL POS_CURSE 
+	JMP DMESS1 
+DMESS2:
+		RET 
+DMESS ENDP
+
+PUTCH PROC
+    PUSH DX
+    ;MOV DX,3F8H;读取接收缓冲区8259A接收缓冲寄存器的内容
+    ;IN AL,DX
+    ;MOV DL,AL 
+    ;MOV AH,2
+    ;INT 21H
+    INC FY
+    CMP FY,73
+	JLE change_FY
+	MOV FY,43
+	INC FX
+	MOV BL,FILE_OUT[3]
+	CMP FX,BL
+	JLE change_FX
+	MOV BX,OFFSET FILE_OUT_UP
+	MOV CL,FILE_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	MOV BL,FILE_OUT[3]
+	MOV FX,BL
+change_FX:
+    MOV BL,FX
+    MOV CURSE_FILEOUT[0],BL
+change_FY:
+	MOV BL,FY
+	MOV CURSE_FILEOUT[1],BL
+	MOV BX,OFFSET CURSE_FILEOUT
+	CALL POS_CURSE
+    POP DX
+    RET 
+PUTCH ENDP 
+
+;初始化8250
+I8250 PROC
+	MOV DX,2FBH    ;寻址为置1
+	MOV AL,80H
+	OUT DX,AL
+	MOV DX,2F9H	 ;写除数寄存器高8位
+	MOV AL,0
+	OUT DX,AL
+	MOV DX,2F8H	 ;写除数寄存器低8位,波特率为1200
+	MOV AL,60H
+	OUT DX,AL
+	MOV DX,2FBH  	 ;写帧数据格式:8数据为,1停止位,无校验位	 
+	MOV AL,03H
+	OUT DX,AL
+	MOV DX,2F9H 	 ;允许8250内部提出中断	
+	MOV AL,01H
+	OUT DX,AL
+	MOV DX,2FCH
+	MOV AL,00011000B  ;D4=1内环自检, D3=1开放中断, D4=0正常通信
+	OUT DX,AL
+	RET     ;段内返回
+I8250 ENDP
+
+;开放主8259辅串口中断  D3位
+I8259 PROC
+	IN AL,0A1H  
+	AND AL,11101111B	;从8259AIR4置0 开放从8259A的保留中断IR4
+	OUT 0A1H,AL
+	IN AL,21H  
+	AND AL,11110011B  ;主8259AIR2和IR3置0 开放辅串口中断IR3和来自从8259A的中断IR2
+	OUT 21H,AL
+	RET     ;段内返回
+I8259 ENDP
+
+RD0B PROC
+	MOV AX,350BH
+	INT 21H
+	MOV WORD PTR OLD0B,BX
+	MOV WORD PTR OLD0B+2,ES
+	RET   ;段内返回
+RD0B ENDP
+
+WR0B PROC
+	PUSH DS
+	MOV AX,CODE
+	MOV DS,AX
+	MOV DX,OFFSET RECEIVE
+	MOV AX,250BH
+	INT 21H
+	POP DS
+	RET	;段内返回
+WR0B ENDP
+
+RD74 PROC
+	MOV AX,3574H
+	INT 21H
+	MOV WORD PTR OLD74,BX
+	MOV WORD PTR OLD74,ES
+	RET
+RD74 ENDP
+
+WR74 PROC
+	PUSH DS
+	MOV AX,CODE
+	MOV DS,AX
+	MOV DX,OFFSET SERVER
+	MOV AX,2574H
+	INT 21H
+	POP DS
+	RET
+WR74 ENDP
+
+RESET PROC
+	IN AL,21H
+	OR AL,00001100B    ;将中断屏蔽寄存器的辅串口中断屏蔽字置1，关闭8259辅串口中断和IMR2从8259A
+	OUT 21H,AL
+	MOV AX,250BH
+	MOV DX,WORD PTR OLD0B
+	MOV DS,WORD PTR OLD0B+2
+	INT 21H
+	MOV DX,WORD PTR OLD74
+	MOV DS,WORD PTR OLD74+2
+	INT 21H
+	RET	;段内返回
+RESET ENDP
+
+CLEAR PROC ;清屏
+	MOV AH,6 ;向上滚动窗口
+	MOV AL,0 ;
+	MOV BH,7 ;背景颜色和文字颜色
+	MOV CH,0 ;高行数
+	MOV CL,0 ;左列数
+    MOV DH,24 ;低行数
+	MOV DL,79 ;右列数
+	INT 10H 
+	RET	;段内返回
+CLEAR ENDP
+
+UI_DESIGN PROC
+	;清屏
+	CALL CLEAR
+	LEA SI,SHOW
+	MOV DX,SI
+	MOV AH,09H
+	INT 21H
+	;设置左窗口参数
+	MOV BX,OFFSET WIN_LEFT
+	MOV CL,WIN_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	;设置右窗口参数
+	MOV BX,OFFSET WIN_RIGHT
+	CALL SCROLL
+	;设置按钮参数
+	MOV BX,OFFSET BUTTON
+	MOV CL,FILE_COLOR
+	MOV COLOR,CL
+	CALL SCROLL
+	;设置fileBUTTONs
+	MOV BX,OFFSET CURSE_BUTTON
+	CALL POS_CURSE
+	MOV DX,OFFSET FILE
+	MOV AH,9
+	INT 21H
+	;设置file_text
+	MOV BX,OFFSET FILE_TEXT
+	CALL SCROLL
+	;设置文件显示框
+	MOV BX,OFFSET FILE_OUT
+	CALL SCROLL
+	;设置初始光标位置
+	MOV BX,OFFSET CURSE_LEFT
+	CALL POS_CURSE
+	RET
+UI_DESIGN ENDP
+
+SCROLL PROC ;显示窗口
+	MOV AH,6 ;向上滚动窗口
+	MOV AL,[BX]  ;上卷行数
+	MOV CH,[BX + 1] ;左上角行号
+	MOV CL,[BX + 2] ;左上角列号
+	MOV DH,[BX + 3] ;右上角行号
+	MOV DL,[BX + 4] ;右上角列号
+	MOV BH,COLOR;背景颜色和字符颜色 青色背景和黄色文字
+	INT 10H
+	RET	;段内返回
+SCROLL ENDP
+
+POS_CURSE PROC
+	MOV DH,[BX]
+	MOV DL,[BX+1]
+	MOV BH,0
+	MOV AH,2
+	INT 10H
+	RET  ;段内返回
+POS_CURSE ENDP
+
+CODE ENDS
+	 END BEG
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
